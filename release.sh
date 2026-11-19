@@ -76,7 +76,7 @@ create_signing_identity() {
     sha1="$(cert_sha1)"
     print "Created '$cert_name' (SHA-1 $sha1) in $keychain."
     [[ "$sha1" == "$release_cert_sha1" ]] || print "Set release_cert_sha1=\"$sha1\" in release.sh so releases are signed with it."
-    print "Back it up now (README: 코드 서명 인증서). If macOS asks the first time codesign uses the key, enter the keychain password and choose 'Always Allow'."
+    print "Back it up now (RELEASING.md: 코드 서명 인증서). If macOS asks the first time codesign uses the key, enter the keychain password and choose 'Always Allow'."
 }
 
 mode=release
@@ -128,13 +128,13 @@ fi
 # The stable code identity: without the pinned certificate there is no release (an ad-hoc or
 # different signature would reset every user's permissions).
 [[ "$(security find-identity -p codesigning "$keychain")" == *"$release_cert_sha1"* ]] \
-    || fail "signing certificate $release_cert_sha1 ('$cert_name') with its private key is not in $keychain (README: 코드 서명 인증서)"
+    || fail "signing certificate $release_cert_sha1 ('$cert_name') with its private key is not in $keychain (RELEASING.md: 코드 서명 인증서)"
 
 # The Keychain EdDSA key must be the one whose public half ships in the app.
 swift package --scratch-path "$root/.build" resolve
 sparkle_bin="$root/.build/artifacts/sparkle/Sparkle/bin"
 key_public="$("$sparkle_bin/generate_keys" --account "$account" -p)" \
-    || fail "no Sparkle EdDSA key for account '$account' in the Keychain (see README: 업데이트 서명 키)"
+    || fail "no Sparkle EdDSA key for account '$account' in the Keychain (see RELEASING.md: 업데이트 서명 키)"
 plist_public="$(plutil -extract SUPublicEDKey raw "$root/MeetingInfo.plist")"
 [[ "$key_public" == "$plist_public" ]] \
     || fail "Keychain key ($key_public) does not match SUPublicEDKey in MeetingInfo.plist ($plist_public)"

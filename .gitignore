@@ -27,5 +27,8 @@ sparkle-key*
 .env
 .env.*
 
+# Maintainer-only release notes for this Mac (kept with the key backups, not published)
+RELEASING.md
+
 # macOS
 .DS_Store

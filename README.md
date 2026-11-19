@@ -105,34 +105,7 @@ swift test --scratch-path .build -j 1 \
   -Xswiftc /Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing/libTestingMacros.dylib
 ```
 
-직접 빌드한 앱은 임시(ad-hoc) 서명이라 빌드할 때마다 macOS가 권한을 다시 묻습니다. `MEETINGCAPTION_SIGN_IDENTITY`(코드 서명 인증서의 SHA-1)를 주면 그 인증서로 서명합니다(`MEETINGCAPTION_SIGN_KEYCHAIN`으로 키체인 파일 지정 가능). 로컬 업데이트 테스트에서만 `MEETINGCAPTION_TEST_FEED_URL`(`http://127.0.0.1:<포트>/…` 또는 localhost 주소)과 `MEETINGCAPTION_TEST_BUNDLE_ID`(실제와 다른 번들 ID)를 함께 쓸 수 있으며, `release.sh`는 이 설정이 남아 있으면 거부합니다.
-
-## 릴리스 만들기 (관리자용)
-
-```sh
-./release.sh --version 1.5.0 --build 9 \
-  --feed-url https://github.com/<owner>/<repo>/releases/latest/download/appcast.xml \
-  --notes notes/1.5.0.ko.md [--notes-en notes/1.5.0.en.md]
-```
-
-`dist/1.5.0/`에 `MeetingCaption-1.5.0.dmg`, `MeetingCaption-1.5.0.dmg.sha256`, `MeetingCaption-1.5.0.zip`(Sparkle 업데이트 파일), 서명된 `appcast.xml`이 만들어집니다. 태그 `v1.5.0`으로 GitHub Release를 만들고 네 파일을 모두 올린 뒤, 스크립트가 출력한 DMG의 SHA-256 값을 릴리스 노트에 적고 **Latest release**로 게시하세요. `--build`는 릴리스마다 반드시 커져야 합니다. 릴리스 노트는 `.md`, `.html`, `.txt`를 지원하며 한국어가 기본으로 표시됩니다.
-
-`release.sh`는 GitHub 릴리스 형식의 `--feed-url`, `MeetingInfo.plist`의 번들 ID, 아래의 코드 서명 인증서가 모두 맞을 때만 릴리스를 만들고, 만든 앱의 서명 요구 사항(designated requirement)까지 확인합니다. `MEETINGCAPTION_*` 환경 변수가 남아 있으면 중단합니다. 출력 폴더는 새 폴더이거나 비어 있어야 하며 .app 안일 수 없습니다.
-
-### 코드 서명 인증서
-
-- 릴리스는 이 Mac의 **로그인 키체인**에 있는 자체 서명 인증서 **"MeetingCaption Release Signing"**(SHA-1 `CC849466C28820FE9E0E8C3F6DA779478118D6A7`, `release.sh`의 `release_cert_sha1`)으로 서명합니다. macOS는 권한과 키체인 접근을 이 인증서와 번들 ID로 기억하므로, 모든 릴리스가 같은 인증서를 써야 합니다.
-- 새 Mac에서 처음 한 번만 `./release.sh --create-signing-identity`로 만듭니다(같은 이름이 있으면 거부). 비공개 키는 키체인에만 저장되고 파일로 남지 않습니다.
-- 처음 릴리스할 때 macOS가 "codesign이(가) 키체인의 'Imported Private Key' 키를 사용하려고 합니다" 창을 띄우면 로그인 암호를 입력하고 **항상 허용**을 누르세요. 한 번만 묻습니다.
-- **백업**: 키체인 접근 앱 → 로그인 키체인 → 내 인증서에서 "MeetingCaption Release Signing"을 선택하고 파일 → 항목 내보내기…로 `.p12`(개인 정보 교환) 형식으로 저장하며 강한 암호를 지정합니다. 그 `.p12` 파일을 암호 관리자 등 안전한 곳으로 옮긴 뒤 **이 Mac에 남은 `.p12` 파일을 지우세요**(키체인의 인증서와 키는 지우지 않습니다). 다른 Mac에서는 `security import <파일>.p12 -k ~/Library/Keychains/login.keychain-db -T /usr/bin/codesign`으로 가져옵니다.
-- **잃으면**: 업데이트는 EdDSA 키로 계속 배포할 수 있지만, 새 인증서로 서명한 버전은 macOS가 다른 앱으로 보기 때문에 모든 사용자가 화면 및 시스템 오디오 녹음·마이크·음성 인식 권한과 키체인 API 키 접근을 한 번 다시 허용해야 합니다. 새 인증서를 만든 뒤 `release_cert_sha1`을 바꾸고 릴리스 노트에 알리세요.
-
-### 업데이트 서명 키
-
-- 비공개 EdDSA 키는 이 Mac의 **로그인 키체인**에 있습니다(키체인 접근 → 이름 "Private key for signing Sparkle updates", 계정 `ed25519`). 공개 키는 `MeetingInfo.plist`의 `SUPublicEDKey`에 있습니다.
-- **백업**: `.build/artifacts/sparkle/Sparkle/bin/generate_keys -x ~/secure-backup/sparkle-key.txt`로 내보낸 뒤, 그 `sparkle-key.txt` 파일을 암호 관리자 등 안전한 곳으로 옮기고 **이 Mac에 남은 `sparkle-key.txt` 파일을 지우세요**. 키체인의 키는 지우지 마세요(지우면 이 Mac에서 릴리스를 서명할 수 없습니다). 다른 Mac에서는 `generate_keys -f <파일>`로 가져옵니다.
-- **잃으면**: 앱이 서명이 맞지 않는 appcast를 끝까지 거부하므로, 기존 사용자는 앱 안에서 업데이트를 받을 수 없고 새 버전을 DMG로 직접 설치해야 합니다.
-- 비공개 키나 백업 파일(`sparkle-key.txt`, `.p12`)을 저장소에 넣지 마세요(`.gitignore`가 막습니다).
+직접 빌드한 앱은 임시(ad-hoc) 서명이라 빌드할 때마다 macOS가 권한을 다시 묻습니다. `MEETINGCAPTION_SIGN_IDENTITY`(코드 서명 인증서의 SHA-1)를 주면 그 인증서로 서명합니다(`MEETINGCAPTION_SIGN_KEYCHAIN`으로 키체인 파일 지정 가능). 로컬 업데이트 테스트에서만 `MEETINGCAPTION_TEST_FEED_URL`(`http://127.0.0.1:<포트>/…` 또는 localhost 주소)과 `MEETINGCAPTION_TEST_BUNDLE_ID`(실제와 다른 번들 ID)를 함께 쓸 수 있습니다.
 
 ## 라이선스
 
@@ -152,4 +125,4 @@ MeetingCaption turns system audio or microphone speech into live captions on you
 - **Study features:** bookmarks (⌘D) with marked-only view/export, archive-wide record search, rename / move to Trash / subjects, a glossary for misrecognition fixes and fixed Korean renderings, and optional audio recording with caption-linked playback.
 - **Optional cloud providers:** translation via Google Cloud Translation, DeepL or Papago; AI via OpenAI, Gemini or Claude. All are off by default, use your own key (stored only in the macOS Keychain), and send caption text (never audio) only after explicit consent. Note that the Gemini free tier and DeepL API Free may use submitted content to improve their services (Gemini: including human review).
 - **Updates:** Sparkle checks the GitHub Releases appcast daily and, by default, downloads updates automatically and installs them when you quit. Updates and the appcast are EdDSA-signed; unsigned or mismatched ones are always rejected. From 1.5.0 every release is signed with the same self-signed certificate, so permissions and Keychain access survive updates; moving from the ad-hoc-signed 1.4.0 to 1.5.0 (installed from the DMG) asks once to re-allow Screen & System Audio Recording, Microphone, Speech Recognition and Keychain access.
-- **Build / release:** see the commands above (`build-meeting.sh`, `release.sh`).
+- **Build:** see the commands above (`build-meeting.sh`).
