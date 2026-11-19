@@ -1,0 +1,31 @@
+# SwiftPM / build output
+.build/
+.swiftpm/
+DerivedData/
+*.xcodeproj/
+xcuserdata/
+
+# Release output (release.sh) and built apps
+dist/
+*.app/
+*.dmg
+*.zip
+appcast.xml
+*.dSYM/
+
+# Secrets: exported Sparkle EdDSA keys (generate_keys -x), code-signing identity backups
+# (.p12 from Keychain Access), keychain files, API keys
+*.pem
+*.key
+*private*key*
+sparkle_private*
+sparkle-key*
+*.p12
+*.pfx
+*.keychain
+*.keychain-db
+.env
+.env.*
+
+# macOS
+.DS_Store
