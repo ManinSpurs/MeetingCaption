@@ -34,6 +34,9 @@ struct MeetingCaptionApp: App {
             Button("저장하고 새 기록 시작") { model.saveAndStartNewSession() }
                 .keyboardShortcut("n")
                 .disabled(model.isStarting || model.isStopping || model.isSwitchingSession)
+            Button("파일 받아쓰기…") { model.chooseFileToImport() }
+                .keyboardShortcut("o")
+                .disabled(model.isLocked)
         }
         CommandMenu("회의") {
             Button("크게 보기") { captionFontSize = min(36, captionFontSize + 1) }

@@ -414,6 +414,57 @@ public enum MeetingAIContextBuilder {
     }
 }
 
+/// The shape of a summary: three headings. Bullets under the first are free; bullets under the
+/// other two are claims the app backs with the caption they cite.
+public enum MeetingSummaryTemplate: String, CaseIterable, Identifiable, Sendable {
+    case meeting, lecture
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .meeting: "회의록"
+        case .lecture: "강의 노트"
+        }
+    }
+
+    /// What the record is called in status and scope lines.
+    public var subject: String {
+        switch self {
+        case .meeting: "회의"
+        case .lecture: "강의"
+        }
+    }
+
+    public var pointsHeading: String {
+        switch self {
+        case .meeting: "핵심 내용"
+        case .lecture: "핵심 개념"
+        }
+    }
+
+    public var discussionHeading: String {
+        switch self {
+        case .meeting: "결정 논의(원문 확인)"
+        case .lecture: "내용 정리(원문 확인)"
+        }
+    }
+
+    public var candidateHeading: String {
+        switch self {
+        case .meeting: "할 일 후보(원문 확인)"
+        case .lecture: "시험·과제 언급(원문 확인)"
+        }
+    }
+
+    var interpretedSections: String {
+        switch self {
+        case .meeting: "결정과 할 일은"
+        case .lecture: "내용 정리와 시험·과제 언급은"
+        }
+    }
+}
+
 /// Resolves summary claim lines against the captions that were actually sent. It decides nothing
 /// about meaning: a claim keeps its model wording, and the app only appends the original caption
 /// text of the timestamp the claim cites, or moves the claim to a confirmation-needed list when the
@@ -432,16 +483,19 @@ public enum MeetingAISourceResolution {
     }
 
     /// Shown above every summary so a reader cannot mistake the draft for a verified record.
-    public static let prelude = """
-    모델이 생성한 초안입니다. 결정과 할 일은 자막을 바탕으로 한 모델의 해석이며, 앱이 참·거짓을 \
-    판정한 것이 아닙니다. "↳ 자막 원문" 줄은 앱이 이 요청에 실제로 전달한 자막에서 그대로 옮긴 \
-    인용입니다(정규화로 줄바꿈·공백이 바뀌었고, 길면 생략 표시가 붙습니다).
-    """
+    public static func prelude(for template: MeetingSummaryTemplate) -> String {
+        """
+        모델이 생성한 초안입니다. \(template.interpretedSections) 자막을 바탕으로 한 모델의 해석이며, 앱이 참·거짓을 \
+        판정한 것이 아닙니다. "↳ 자막 원문" 줄은 앱이 이 요청에 실제로 전달한 자막에서 그대로 옮긴 \
+        인용입니다(정규화로 줄바꿈·공백이 바뀌었고, 길면 생략 표시가 붙습니다).
+        """
+    }
 
+    public static let prelude = prelude(for: .meeting)
     public static let unresolvedHeading = "확인 필요 · 자막 근거 미확인"
-    public static let discussionHeading = "결정 논의(원문 확인)"
-    public static let candidateHeading = "할 일 후보(원문 확인)"
-    public static let pointsHeading = "핵심 내용"
+    public static let discussionHeading = MeetingSummaryTemplate.meeting.discussionHeading
+    public static let candidateHeading = MeetingSummaryTemplate.meeting.candidateHeading
+    public static let pointsHeading = MeetingSummaryTemplate.meeting.pointsHeading
     /// The marker the prompt asks for when a section has nothing in it. It asserts no fact, so it
     /// is kept in place instead of being treated as a claim that needs source confirmation.
     public static let emptySectionMarker = "자막에 명시된 내용 없음"
@@ -466,7 +520,8 @@ public enum MeetingAISourceResolution {
     /// Rewrites only the citation part of decision and action lines. Any evidence line the model
     /// wrote is discarded and rebuilt from `sources`, so the result is idempotent and never carries
     /// a quote that was not in the request.
-    public static func resolve(_ summary: String, sources: [String: [String]]) -> Summary {
+    public static func resolve(_ summary: String, sources: [String: [String]],
+                               template: MeetingSummaryTemplate = .meeting) -> Summary {
         var output: [String] = []
         var unresolved: [String] = []
         var current: Section = .points
@@ -476,12 +531,12 @@ public enum MeetingAISourceResolution {
         for rawLine in summary.components(separatedBy: "\n") {
             let line = rawLine.trimmingCharacters(in: .whitespaces)
             if line.isEmpty { continue }
-            if let heading = section(for: line) {
+            if let heading = section(for: line, template: template) {
                 current = heading
                 guard lastHeading != heading else { continue }
                 lastHeading = heading
                 if heading == .unresolved { continue }
-                output.append(name(of: heading))
+                output.append(name(of: heading, template: template))
                 continue
             }
             if isModelEvidenceLine(line) { continue }
@@ -545,12 +600,20 @@ public enum MeetingAISourceResolution {
     }
 
     /// Lenient heading match, including the legacy labels the model still produces.
-    static func section(for line: String) -> Section? {
+    static func section(for line: String, template: MeetingSummaryTemplate = .meeting) -> Section? {
         let cleaned = line.lowercased()
             .trimmingCharacters(in: CharacterSet(charactersIn: "#*• -:·[]_"))
             .trimmingCharacters(in: .whitespaces)
         guard !cleaned.isEmpty, cleaned.count <= 40 else { return nil }
         let bare = cleaned.replacingOccurrences(of: " ", with: "")
+        if template == .lecture {
+            if ["핵심개념", "주요개념", "개념", "keyconcepts", "concepts"].contains(bare) { return .points }
+            if ["내용정리(원문확인)", "내용정리", "강의내용", "주요내용", "lecturenotes", "notes"].contains(bare) {
+                return .discussion
+            }
+            if ["시험·과제언급(원문확인)", "시험·과제언급", "시험과제언급", "시험·과제", "시험과제", "시험", "과제",
+                "examsandassignments", "exams", "assignments"].contains(bare) { return .candidates }
+        }
         if ["decisions", "decision", "결정논의(원문확인)", "확정된결정", "결정", "결정사항"].contains(bare) {
             return .discussion
         }
@@ -561,13 +624,48 @@ public enum MeetingAISourceResolution {
         return nil
     }
 
-    static func name(of section: Section) -> String {
+    static func name(of section: Section, template: MeetingSummaryTemplate = .meeting) -> String {
         switch section {
-        case .points: pointsHeading
-        case .discussion: discussionHeading
-        case .candidates: candidateHeading
+        case .points: template.pointsHeading
+        case .discussion: template.discussionHeading
+        case .candidates: template.candidateHeading
         case .unresolved: unresolvedHeading
         }
+    }
+
+    /// A place in a summary that names a caption time.
+    public struct StampLink: Equatable, Sendable {
+        public var range: Range<String.Index>
+        public var stamp: String
+    }
+
+    private static let linkPattern = try! NSRegularExpression(
+        pattern: "[\\[(](\\d{2,}:\\d{2})[\\])]|" + NSRegularExpression.escapedPattern(for: excerptArrow) + "(\\d{2,}:\\d{2})")
+
+    /// Every caption time a summary shows: a cited `(mm:ss)` / `[mm:ss]` label, and the time on
+    /// an app-written "↳ 자막 원문" line. The range covers what the reader would click.
+    public static func stampLinks(in text: String) -> [StampLink] {
+        let whole = NSRange(text.startIndex..<text.endIndex, in: text)
+        return linkPattern.matches(in: text, range: whole).compactMap { match in
+            if let stamp = Range(match.range(at: 1), in: text), let label = Range(match.range, in: text) {
+                return StampLink(range: label, stamp: String(text[stamp]))
+            }
+            guard let stamp = Range(match.range(at: 2), in: text) else { return nil }
+            return StampLink(range: stamp, stamp: String(text[stamp]))
+        }
+    }
+
+    /// The caption a stamp points at: the first one that renders to that label. Merging
+    /// sentences after a summary was written can move a caption's start, so otherwise it is the
+    /// last caption that had begun by that second; a time past the record points at nothing.
+    public static func caption(forStamp stamp: String, in captions: [Caption]) -> Caption? {
+        if let exact = captions.first(where: { MeetingAIContextBuilder.stamp($0.start) == stamp }) { return exact }
+        let fields = stamp.split(separator: ":")
+        guard fields.count == 2, let minutes = Int(fields[0]), let seconds = Int(fields[1]), seconds < 60,
+              let last = captions.last else { return nil }
+        let time = Double(minutes * 60 + seconds)
+        guard time <= last.end else { return nil }
+        return captions.last { $0.start <= time }
     }
 
     /// Accepts both `[mm:ss]` and `(mm:ss)`: the prompt asks for parentheses while the context

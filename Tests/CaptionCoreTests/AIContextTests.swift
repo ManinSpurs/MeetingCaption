@@ -260,6 +260,65 @@ struct MeetingAIContextTests {
         #expect(!text.contains("확정된 결정"))
     }
 
+    /// Lecture notes use their own three headings; the last two are backed by the cited caption
+    /// exactly like a meeting's decisions and tasks.
+    @Test func lectureTemplateKeepsItsHeadingsAndBacksCitedPoints() {
+        let summary = """
+        핵심 개념
+        - 균형 가격: 수요와 공급이 만나는 가격 (00:12)
+        내용 정리
+        - 가격이 오르면 수요가 줄어든다는 예시 (00:40)
+        시험·과제
+        - 다음 주 퀴즈 범위는 3장
+        """
+        let result = MeetingAISourceResolution.resolve(summary, sources: sources([
+            ("00:12", "The equilibrium price is where supply meets demand."),
+            ("00:40", "When the price goes up, people buy less.")
+        ]), template: .lecture)
+        #expect(result.text.contains("핵심 개념\n- 균형 가격: 수요와 공급이 만나는 가격 (00:12)"))
+        #expect(result.text.contains("내용 정리(원문 확인)\n- 가격이 오르면 수요가 줄어든다는 예시 (00:40)"))
+        #expect(result.text.contains("↳ 자막 원문: 00:40 When the price goes up, people buy less."))
+        #expect(!result.text.contains(MeetingAISourceResolution.discussionHeading))
+        // The quiz line cites no caption, so it is kept as a claim to confirm, not as a fact.
+        let confirmed = result.text.components(separatedBy: MeetingAISourceResolution.unresolvedHeading)
+        #expect(confirmed.count == 2)
+        #expect(confirmed.first?.contains("퀴즈") == false)
+        #expect(confirmed.last?.contains("다음 주 퀴즈 범위는 3장") == true)
+        #expect(MeetingAISourceResolution.prelude(for: .lecture).contains("내용 정리와 시험·과제 언급은"))
+        #expect(MeetingAISourceResolution.prelude(for: .meeting) == MeetingAISourceResolution.prelude)
+    }
+
+    /// The reader can click every caption time a summary shows: a cited label and the time on
+    /// the app's own quotation line, but not a time range in a part header.
+    @Test func summaryStampsAreLinkedWhereTheyAppear() {
+        let text = """
+        ■ 구간 1/2 · 자막 2/4개 (00:00–01:10)
+        핵심 내용
+        - 문구 검토 [00:12]
+        결정 논의(원문 확인)
+        - 화요일 출시 합의 (61:05)
+            ↳ 자막 원문: 61:05 We agreed to release on Tuesday.
+        """
+        let links = MeetingAISourceResolution.stampLinks(in: text)
+        #expect(links.map(\.stamp) == ["00:12", "61:05", "61:05"])
+        #expect(links.map { String(text[$0.range]) } == ["[00:12]", "(61:05)", "61:05"])
+    }
+
+    @Test func stampFindsItsCaptionEvenAfterSentencesWereMerged() {
+        let captions = [
+            Caption(start: 12.4, end: 15, text: "First."),
+            Caption(start: 38.2, end: 44, text: "Merged sentence that used to start at forty."),
+            Caption(start: 61.9, end: 65, text: "Last.")
+        ]
+        #expect(MeetingAISourceResolution.caption(forStamp: "00:12", in: captions)?.text == "First.")
+        #expect(MeetingAISourceResolution.caption(forStamp: "01:01", in: captions)?.text == "Last.")
+        // No caption renders to 00:40 any more: the one that covers it is found instead.
+        #expect(MeetingAISourceResolution.caption(forStamp: "00:40", in: captions)?.start == 38.2)
+        #expect(MeetingAISourceResolution.caption(forStamp: "00:05", in: captions) == nil)
+        #expect(MeetingAISourceResolution.caption(forStamp: "09:00", in: captions) == nil)
+        #expect(MeetingAISourceResolution.caption(forStamp: "00:12", in: []) == nil)
+    }
+
     @Test func captionsAreSentWithTheirOwnTimestampAndTextOnly() {
         var transcript = Transcript(title: "Plain", locale: "en-US", source: "system")
         transcript.captions = [

@@ -201,6 +201,12 @@ protocol MeetingSpeechEngine: AnyObject {
     func startLive(source: String, localeID: String, offset: Double) async throws
     /// `recorder`, when given, receives every buffer handed to recognition.
     func startLive(source: String, localeID: String, offset: Double, recorder: AudioSegmentWriter?) async throws
+    /// Starts recognizing an audio or video file from its beginning (caption time 0) and returns
+    /// once reading has begun. `progress` receives the fraction of the file read so far.
+    func startFile(url: URL, localeID: String, recorder: AudioSegmentWriter?,
+                   progress: @escaping @Sendable (Double) -> Void) async throws
+    /// Returns when the whole file has been recognized, or after `finish()` ended it early.
+    func waitUntilFileEnds() async throws
     func finish() async throws
     func cancel() async
 }
@@ -209,6 +215,13 @@ extension MeetingSpeechEngine {
     func startLive(source: String, localeID: String, offset: Double, recorder: AudioSegmentWriter?) async throws {
         try await startLive(source: source, localeID: localeID, offset: offset)
     }
+
+    func startFile(url: URL, localeID: String, recorder: AudioSegmentWriter?,
+                   progress: @escaping @Sendable (Double) -> Void) async throws {
+        throw AppFailure("이 음성인식 엔진은 파일 받아쓰기를 지원하지 않습니다.")
+    }
+
+    func waitUntilFileEnds() async throws {}
 }
 
 @MainActor
@@ -218,6 +231,8 @@ final class AppleSpeechEngine: MeetingSpeechEngine {
     private var feeder: AudioFeeder?
     private var microphone: AVAudioEngine?
     private var computer: ComputerAudio?
+    private var fileSource: FileAudioSource?
+    private var fileTask: Task<Void, Error>?
     private var reservedLocale: Locale?
     var onPacket: (SpeechPacket) -> Void = { _ in }
     var onStatus: (String) -> Void = { _ in }
@@ -345,7 +360,49 @@ final class AppleSpeechEngine: MeetingSpeechEngine {
         onStatus("인식 중입니다. 자막은 계속 누적됩니다.")
     }
 
+    func startFile(url: URL, localeID: String, recorder: AudioSegmentWriter?,
+                   progress: @escaping @Sendable (Double) -> Void) async throws {
+        onStatus("애플 음성인식을 준비하고 있습니다.")
+        let (transcriber, analyzer) = try await prepare(localeID: localeID)
+        guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
+            throw AppFailure("음성인식용 오디오 형식을 찾지 못했습니다.")
+        }
+        try await analyzer.prepareToAnalyze(in: format)
+        let source = try await FileAudioSource(url: url, target: format, recorder: recorder, progress: progress)
+        fileSource = source
+        listen(to: transcriber)
+        let results = resultTask
+        // The recognizer pulls each chunk when it is ready for it, so a long file is read at
+        // the recognizer's pace.
+        let input = AsyncStream<AnalyzerInput>(unfolding: { source.next() })
+        fileTask = Task {
+            _ = try await analyzer.analyzeSequence(input)
+            try await analyzer.finalizeAndFinishThroughEndOfInput()
+            try await results?.value
+            if let message = source.failure { throw AppFailure("파일을 끝까지 읽지 못했습니다: \(message)") }
+        }
+    }
+
+    func waitUntilFileEnds() async throws {
+        try await fileTask?.value
+    }
+
     func finish() async throws {
+        if let source = fileSource {
+            // Everything read so far is still recognized; nothing more is read.
+            source.stop()
+            fileSource = nil
+            let reading = fileTask
+            fileTask = nil
+            do {
+                try await reading?.value
+                await release()
+            } catch {
+                await cancel()
+                throw error
+            }
+            return
+        }
         if let audio = microphone {
             audio.inputNode.removeTap(onBus: 0)
             audio.stop()
@@ -375,6 +432,10 @@ final class AppleSpeechEngine: MeetingSpeechEngine {
         computer = nil
         await feeder?.finish()
         feeder = nil
+        fileSource?.stop()
+        fileSource = nil
+        fileTask?.cancel()
+        fileTask = nil
         await analyzer?.cancelAndFinishNow()
         resultTask?.cancel()
         await release()

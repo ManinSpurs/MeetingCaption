@@ -73,6 +73,12 @@ final class MeetingModel: ObservableObject {
     @Published private(set) var playingCaptionID: UUID?
     private var audioWriter: AudioSegmentWriter?
     private var audioSegmentFile: String?
+    /// `Transcript.source` of a record made from a file rather than from a live input.
+    static let fileSource = "file"
+    /// Fraction of the file read so far while "파일 받아쓰기" runs; nil otherwise.
+    @Published private(set) var importProgress: Double?
+    private var importTask: Task<Void, Never>?
+    private var importReachedEnd = false
     @Published var translationEnabled = true {
         didSet { translationLoopID = UUID() }
     }
@@ -333,10 +339,99 @@ final class MeetingModel: ObservableObject {
         }
     }
 
+    // MARK: - File transcription
+
+    var isImporting: Bool { importProgress != nil }
+
+    /// "파일 받아쓰기…": asks for an audio or video file.
+    func chooseFileToImport() {
+        guard !isLocked, !isClosing else { return }
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = FileAudioSource.contentTypes
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.message = "받아쓸 녹음 또는 동영상 파일을 고르세요. \(Locale.current.localizedString(forIdentifier: localeID) ?? localeID)(으)로 인식합니다."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        importFile(url)
+    }
+
+    /// Turns an audio or video file into a new record: recognized in the selected language from
+    /// the file's start, with a compact copy of its sound kept beside the record so every
+    /// caption can be replayed. The open record is saved first and is not changed.
+    func importFile(_ url: URL) {
+        guard !isLocked, !isClosing else { return }
+        guard newSession(reason: nil), let jsonURL else { return }
+        transcript.source = Self.fileSource
+        transcript.title = url.deletingPathExtension().lastPathComponent
+        let file = RecordAudio.newSegmentFile(for: transcript, record: jsonURL)
+        transcript.audio = [AudioSegment(file: file, start: 0)]
+        let writer = AudioSegmentWriter(url: jsonURL.deletingLastPathComponent().appendingPathComponent(file),
+                                        timelineStart: 0) { [weak self] message in
+            Task { @MainActor in self?.errorMessage = message }
+        }
+        guard persist() else {
+            transcript.audio = nil
+            return
+        }
+        player.stop()
+        playingCaptionID = nil
+        hasPlayableAudio = false
+        audioWriter = writer
+        audioSegmentFile = file
+        isStarting = true
+        importProgress = 0
+        importReachedEnd = false
+        errorMessage = nil
+        highlight = nil
+        let service = makeEngine()
+        let id = engineID
+        let language = localeID
+        let name = url.lastPathComponent
+        operation = Task {
+            do {
+                try await service.startFile(url: url, localeID: language, recorder: writer) { [weak self] fraction in
+                    Task { @MainActor in
+                        guard let self, self.engineID == id, self.importProgress != nil else { return }
+                        self.importProgress = fraction
+                    }
+                }
+                try Task.checkCancellation()
+                isStarting = false
+                isRecording = true
+                status = "‘\(name)’을(를) 받아쓰고 있습니다. 확정된 자막은 자동 저장됩니다."
+                // The file ends on its own; that is the same as pressing 중지.
+                importTask = Task { [weak self] in
+                    var failure: String?
+                    do { try await service.waitUntilFileEnds() }
+                    catch { failure = error.localizedDescription }
+                    guard let self, self.engineID == id, self.isRecording, !self.isStopping else { return }
+                    if let failure { self.errorMessage = failure }
+                    self.importReachedEnd = failure == nil
+                    self.stop()
+                }
+            } catch {
+                await service.cancel()
+                await finishAudio(keep: false)
+                persist()
+                engineID = UUID()
+                engine = nil
+                isStarting = false
+                isRecording = false
+                importProgress = nil
+                if !(error is CancellationError) {
+                    errorMessage = error.localizedDescription
+                    status = "파일을 받아쓰지 못했습니다."
+                }
+            }
+            operation = nil
+        }
+    }
+
     func stop() {
         guard !isStopping, !isClosing, isStarting || isRecording else { return }
         isStopping = true
         let wasLive = isRecording
+        let wasImporting = isImporting
         isRecording = false
         status = wasLive ? "마지막 문장을 확정하고 저장하고 있습니다." : "시작을 취소하고 있습니다."
         let service = engine
@@ -366,7 +461,16 @@ final class MeetingModel: ObservableObject {
             if saved { announceSave() }
             reloadPlayback()
             refreshLibrary()
-            status = saved ? "중지했습니다. 확정된 자막 \(transcript.captions.count)개를 보관했습니다." : "중지했지만 저장하지 못했습니다. 내용을 복사해 보관해 주세요."
+            importProgress = nil
+            importTask = nil
+            if !saved {
+                status = "중지했지만 저장하지 못했습니다. 내용을 복사해 보관해 주세요."
+            } else if wasImporting && wasLive {
+                status = (importReachedEnd ? "파일 받아쓰기를 마쳤습니다." : "파일 받아쓰기를 중지했습니다. 여기까지 받아쓴 내용만 보관합니다.")
+                    + " 자막 \(transcript.captions.count)개를 보관했습니다."
+            } else {
+                status = "중지했습니다. 확정된 자막 \(transcript.captions.count)개를 보관했습니다."
+            }
             stopTask = nil
             return saved && finalized
         }
@@ -509,6 +613,18 @@ final class MeetingModel: ObservableObject {
               let cue = transcript.captions.first(where: { $0.id == captionID }),
               let spot = AudioTimeline.locate(cue.start, in: player.segments) else { return }
         player.play(segment: spot.index, at: spot.offset)
+    }
+
+    /// A caption time cited in a summary: scrolls to that caption and, when the record has
+    /// audio for it, plays from there (never while recording).
+    func openStamp(_ stamp: String) {
+        guard let cue = MeetingAISourceResolution.caption(forStamp: stamp, in: transcript.captions) else {
+            status = "이 기록에서 \(stamp) 자막을 찾지 못했습니다."
+            return
+        }
+        if showsMarkedOnly && !cue.isBookmarked { showsMarkedOnly = false }
+        highlight = CaptionHighlight(captionID: cue.id)
+        play(from: cue.id)
     }
 
     private func playbackMoved(segment index: Int, offset: Double) {
@@ -788,6 +904,7 @@ final class MeetingModel: ObservableObject {
         flushCaptionPause()
         isRecording = false
         isStarting = false
+        importProgress = nil
         return persist()
     }
 

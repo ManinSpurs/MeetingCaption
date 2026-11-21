@@ -21,6 +21,11 @@ struct MeetingView: View {
         } detail: {
             workspace
                 .toolbar { meetingToolbar }
+                .dropDestination(for: URL.self) { urls, _ in
+                    guard !model.isLocked, let url = urls.first(where: \.isFileURL) else { return false }
+                    model.importFile(url)
+                    return true
+                }
         }
         .frame(minWidth: ui.showAssistant ? 1040 : 880, minHeight: 600)
         .task(id: model.translationTaskID) { await model.runInstalledTranslation() }
@@ -54,7 +59,7 @@ struct MeetingView: View {
                            height: geometry.size.height)
                 if ui.showAssistant {
                     Divider()
-                    MeetingAIPanel(ai: ai, transcript: model.transcript)
+                    MeetingAIPanel(ai: ai, transcript: model.transcript, onOpenStamp: { model.openStamp($0) })
                         .frame(width: 360, height: geometry.size.height)
                 }
             }
@@ -204,7 +209,7 @@ struct MeetingView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.red)
                 .disabled(model.isStopping || model.isSwitchingSession)
-                .help("회의 기록을 마치고 확정된 문장을 저장합니다.")
+                .help(model.isImporting ? "파일 받아쓰기를 멈추고 여기까지 받아쓴 문장을 저장합니다." : "회의 기록을 마치고 확정된 문장을 저장합니다.")
             } else {
                 Button {
                     model.start()
@@ -221,7 +226,13 @@ struct MeetingView: View {
 
     @ViewBuilder
     private var emptyState: some View {
-        if model.isLocked {
+        if model.isImporting {
+            ContentUnavailableView {
+                Label("파일을 받아쓰고 있습니다", systemImage: "waveform.badge.magnifyingglass")
+            } description: {
+                Text("\(displayName(for: model.transcript.locale))(으)로 인식합니다. 첫 문장이 확정되면 여기에 쌓이고, 끝나면 자막을 눌러 그 부분부터 다시 들을 수 있습니다.")
+            }
+        } else if model.isLocked {
             ContentUnavailableView {
                 Label("듣고 있습니다", systemImage: "waveform")
             } description: {
@@ -231,9 +242,9 @@ struct MeetingView: View {
             ContentUnavailableView {
                 Label("회의 기록이 비어 있습니다", systemImage: "waveform")
             } description: {
-                Text("시작을 누르면 선택한 입력과 언어로 회의를 받아씁니다. 확정된 문장은 아래에 계속 쌓이고, 인식 중인 문장은 흐리게 표시됩니다. 쌓인 텍스트는 이어서 선택하거나 전체 선택해 복사할 수 있습니다.")
+                Text("시작을 누르면 선택한 입력과 언어로 회의를 받아씁니다. 확정된 문장은 아래에 계속 쌓이고, 인식 중인 문장은 흐리게 표시됩니다. 쌓인 텍스트는 이어서 선택하거나 전체 선택해 복사할 수 있습니다.\n이미 있는 녹음이나 동영상은 파일을 이 창에 끌어다 놓으면 받아씁니다.")
             } actions: {
-                EmptyView()
+                Button("파일 받아쓰기…") { model.chooseFileToImport() }
             }
         }
     }
@@ -296,7 +307,7 @@ struct MeetingView: View {
                 }
                 .controlSize(.small)
             }
-            Button("번역 설정…") { SettingsNavigation.shared.show(.translation, using: openSettings) }
+            Button("번역 설정…") { SettingsNavigation.shared.show(.assist, using: openSettings) }
                 .controlSize(.small)
         }
         .padding(.horizontal, 20)
@@ -351,7 +362,7 @@ struct MeetingView: View {
             .font(.caption)
             .help("입력과 인식 언어 설정 열기")
             Button {
-                SettingsNavigation.shared.show(.translation, using: openSettings)
+                SettingsNavigation.shared.show(.assist, using: openSettings)
             } label: {
                 Text(translationChip)
             }
@@ -384,6 +395,13 @@ struct MeetingView: View {
             }
             .disabled(model.isStarting || model.isStopping || model.isSwitchingSession)
             .help("마지막 문장까지 저장한 뒤 같은 입력과 언어로 새 기록을 시작합니다. 전환 중에는 잠시 인식이 끊깁니다.")
+            Button {
+                model.chooseFileToImport()
+            } label: {
+                Label("파일 받아쓰기", systemImage: "waveform.badge.plus")
+            }
+            .disabled(model.isLocked)
+            .help("녹음이나 동영상 파일을 새 기록으로 받아씁니다 (⌘O). 파일을 창에 끌어다 놓아도 됩니다.")
             Button {
                 model.copyBilingual()
             } label: {
@@ -450,6 +468,7 @@ struct MeetingView: View {
     private var stateHeadline: String {
         if model.isStopping { return "저장 중" }
         if model.isStarting { return "준비 중" }
+        if let progress = model.importProgress, model.isRecording { return "받아쓰는 중 \(Int(progress * 100))%" }
         if model.isRecording { return "기록 중" }
         return "대기 중"
     }
@@ -466,7 +485,7 @@ struct MeetingView: View {
     }
 
     private func inputTitle(for raw: String) -> String {
-        MeetingInput(rawValue: raw)?.title ?? raw
+        raw == MeetingModel.fileSource ? "파일" : MeetingInput(rawValue: raw)?.title ?? raw
     }
 }
 

@@ -184,6 +184,30 @@ struct AIServiceTests {
         #expect(ai.errorMessage == nil)
     }
 
+    /// The lecture format asks for lecture headings, shows them, and backs a cited point with
+    /// the caption that was sent, under a status that names what was made.
+    @Test func lectureNotesUseTheLectureFormatFromRequestToResult() async throws {
+        let local = AIStubResponder { _ in
+            "핵심 개념\n- 출시 일정 (00:00)\n내용 정리\n- 출시일을 다시 확인함 (00:20)\n"
+                + "시험·과제 언급\n- 자막에 명시된 내용 없음"
+        }
+        let ai = makeAI(local: local)
+        await ai.generateAndWait(action: .summary, transcript: aiMeeting(4), summaryTemplate: .lecture)
+        let request = try #require(local.requests.first)
+        #expect(request.instructions.contains("내용 정리(원문 확인)"))
+        #expect(request.instructions.contains("시험·과제 언급(원문 확인)"))
+        #expect(!request.instructions.contains(MeetingAISourceResolution.candidateHeading))
+        #expect(request.prompt.contains("Write study notes on this part of the lecture."))
+
+        let text = try #require(ai.results[.summary])
+        #expect(text.hasPrefix(MeetingAISourceResolution.prelude(for: .lecture)))
+        #expect(text.contains("내용 정리(원문 확인)\n- 출시일을 다시 확인함 (00:20)"))
+        #expect(text.contains("↳ 자막 원문: 00:20 Caption number 1 about the launch date."))
+        #expect(text.contains("시험·과제 언급(원문 확인)\n- 자막에 명시된 내용 없음"))
+        #expect(ai.status.hasPrefix("강의 노트 완료"))
+        #expect(ai.errorMessage == nil)
+    }
+
     /// A caption that talks to an assistant is quoted as the caption it is: the summary keeps the
     /// draft claim and shows the injected caption text, so a reader sees the source itself instead
     /// of an app-side verdict about it.

@@ -590,7 +590,8 @@ final class MeetingAI: ObservableObject {
                   transcript: CaptionCore.Transcript,
                   intent: MeetingReplyIntent = .clarify,
                   userIntent: String = "",
-                  selectedExpression: String = "") -> Task<Void, Never> {
+                  selectedExpression: String = "",
+                  summaryTemplate: MeetingSummaryTemplate = .meeting) -> Task<Void, Never> {
         // Every call supersedes the previous one, even when the first task has not started yet:
         // two back-to-back calls must not share a revision and publish each other's results.
         generationRevision &+= 1
@@ -601,7 +602,7 @@ final class MeetingAI: ObservableObject {
             guard let self else { return }
             await self.run(action: action, transcript: snapshot, intent: intent,
                            userIntent: userIntent, selectedExpression: selectedExpression,
-                           revision: revision)
+                           summaryTemplate: summaryTemplate, revision: revision)
         }
         currentTask = task
         return task
@@ -612,34 +613,40 @@ final class MeetingAI: ObservableObject {
                          transcript: CaptionCore.Transcript,
                          intent: MeetingReplyIntent = .clarify,
                          userIntent: String = "",
-                         selectedExpression: String = "") async {
+                         selectedExpression: String = "",
+                         summaryTemplate: MeetingSummaryTemplate = .meeting) async {
         await generate(action: action, transcript: transcript, intent: intent,
-                       userIntent: userIntent, selectedExpression: selectedExpression).value
+                       userIntent: userIntent, selectedExpression: selectedExpression,
+                       summaryTemplate: summaryTemplate).value
     }
 
     private func run(action: MeetingAIAction, transcript: CaptionCore.Transcript, intent: MeetingReplyIntent,
-                     userIntent: String, selectedExpression: String, revision: Int) async {
+                     userIntent: String, selectedExpression: String, summaryTemplate: MeetingSummaryTemplate,
+                     revision: Int) async {
         guard revision == generationRevision else { return }
         errorMessage = nil
+        // Status lines name what is being made: a lecture summary is not a "회의 요약".
+        let title = action == .summary && summaryTemplate != .meeting ? summaryTemplate.title : action.title
 
         if let rejection = MeetingAIPlans.validate(action: action, transcript: transcript,
                                                    selectedExpression: selectedExpression) {
-            status = "\(action.title) 실행 불가"
+            status = "\(title) 실행 불가"
             commit(error: rejection, revision: revision)
             return
         }
         let plan: MeetingAIPlans.Plan
         do {
             plan = try MeetingAIPlans.plan(action: action, transcript: transcript, intent: intent,
-                                           userIntent: userIntent, selectedExpression: selectedExpression)
+                                           userIntent: userIntent, selectedExpression: selectedExpression,
+                                           summaryTemplate: summaryTemplate)
         } catch {
-            status = "\(action.title) 실행 불가"
+            status = "\(title) 실행 불가"
             commit(error: error, revision: revision)
             return
         }
 
         isBusy = true
-        status = "\(action.title) 준비 중…"
+        status = "\(title) 준비 중…"
         scopeDescription = plan.scope
 
         let responder: Selection
@@ -655,7 +662,7 @@ final class MeetingAI: ObservableObject {
 
         do {
             if plan.steps.count == 1 {
-                status = "\(action.title) 생성 중…"
+                status = "\(title) 생성 중…"
                 let step = plan.steps[0]
                 let text = try await respond(step, action: action, using: responder, revision: revision)
                 let bounded = bounded(text, step.maxOutputCharacters)
@@ -663,7 +670,7 @@ final class MeetingAI: ObservableObject {
                 let body: String
                 switch action {
                 case .summary:
-                    body = Self.summaryDraft(bounded, sources: step.sources)
+                    body = Self.summaryDraft(bounded, sources: step.sources, template: plan.summaryTemplate)
                 case .expressions:
                     guard MeetingAIOutputCheck.correctedPhraseIsEnglish(bounded) else {
                         throw MeetingAIError.unusableOutput(
@@ -682,7 +689,7 @@ final class MeetingAI: ObservableObject {
             guard revision == generationRevision else { return }
             isBusy = false
             scopeDescription = ""
-            status = "\(action.title) 완료 · \(Self.timeText(Date()))"
+            status = "\(title) 완료 · \(Self.timeText(Date()))"
         } catch {
             guard revision == generationRevision else { return }
             isBusy = false
@@ -691,7 +698,7 @@ final class MeetingAI: ObservableObject {
                 status = MeetingAIError.cancelled.localizedDescription
                 return
             }
-            status = "\(action.title) 실패"
+            status = "\(title) 실패"
             commit(error: error, revision: revision)
         }
     }
@@ -703,6 +710,8 @@ final class MeetingAI: ObservableObject {
                                responder: MeetingAI.Selection, revision: Int) async throws {
         var summaries: [String] = []
         let sources = Self.aggregatedSources(plan.steps)
+        let template = plan.summaryTemplate
+        let prelude = MeetingAISourceResolution.prelude(for: template)
         for (index, step) in plan.steps.enumerated() {
             guard revision == generationRevision, !Task.isCancelled else { throw MeetingAIError.cancelled }
             status = "\(plan.steps.count)개 구간 중 \(index + 1)번째 요약 중…"
@@ -711,7 +720,7 @@ final class MeetingAI: ObservableObject {
                 let text = try await respond(step, action: action, using: responder, revision: revision)
                 let bounded = bounded(text, step.maxOutputCharacters)
                 summaries.append("■ \(step.scope)\n"
-                    + MeetingAISourceResolution.resolve(bounded, sources: step.sources).text)
+                    + MeetingAISourceResolution.resolve(bounded, sources: step.sources, template: template).text)
             } catch {
                 // Cancellation and supersession must never look like a finished run: they leave
                 // this function by throwing, so no "완료" status or empty result can follow.
@@ -721,9 +730,9 @@ final class MeetingAI: ObservableObject {
                 }
                 let kept = summaries.isEmpty ? "요약된 구간이 없습니다." : summaries.joined(separator: "\n\n")
                 let body = "부분 결과 — 구간 \(index + 1)/\(plan.steps.count)을(를) 요약하지 못했습니다.\n"
-                    + "아래 내용은 회의 전체의 완전한 요약이 아닙니다.\n실패 사유: "
+                    + "아래 내용은 \(template.subject) 전체의 완전한 요약이 아닙니다.\n실패 사유: "
                     + Self.sanitize(aiError.localizedDescription) + "\n\n"
-                    + MeetingAISourceResolution.prelude + "\n\n" + kept
+                    + prelude + "\n\n" + kept
                 _ = commit(text: body, action: action,
                            scope: "부분 결과 · \(index + 1)/\(plan.steps.count) 구간 실패", revision: revision)
                 throw MeetingAIError.http(status: 0,
@@ -738,22 +747,23 @@ final class MeetingAI: ObservableObject {
             // Part summaries of a very long meeting can themselves exceed one request, so merging
             // is recursive and bounded: levels of grouping until one summary fits, or an honest
             // complete per-part listing when merging is not possible.
-            let merged = try await merge(summaries, sources: sources, action: action,
+            let merged = try await merge(summaries, sources: sources, template: template, action: action,
                                          responder: responder, revision: revision)
-            _ = commit(text: MeetingAISourceResolution.prelude + "\n\n" + merged.text,
+            _ = commit(text: prelude + "\n\n" + merged.text,
                        action: action, scope: merged.scope, revision: revision)
         } else {
             let joined = summaries.joined(separator: "\n\n")
-            _ = commit(text: MeetingAISourceResolution.prelude + "\n\n" + joined,
+            _ = commit(text: prelude + "\n\n" + joined,
                        action: action, scope: plan.scope, revision: revision)
         }
     }
 
     /// The draft banner plus the resolved body. The banner is what keeps a model summary from
     /// reading as a verified record of what the meeting decided.
-    static func summaryDraft(_ text: String, sources: [String: [String]]) -> String {
-        MeetingAISourceResolution.prelude + "\n\n"
-            + MeetingAISourceResolution.resolve(text, sources: sources).text
+    static func summaryDraft(_ text: String, sources: [String: [String]],
+                             template: MeetingSummaryTemplate = .meeting) -> String {
+        MeetingAISourceResolution.prelude(for: template) + "\n\n"
+            + MeetingAISourceResolution.resolve(text, sources: sources, template: template).text
     }
 
     /// Every caption the plan actually sent, keyed by label. Merge steps are quoted model text, so
@@ -812,8 +822,8 @@ final class MeetingAI: ObservableObject {
     /// Merges part summaries in bounded groups, repeating until one group remains. When a group is
     /// still too large for one request the content is left as an explicit part listing rather than
     /// dropped, and the returned scope says so.
-    private func merge(_ summaries: [String], sources: [String: [String]], action: MeetingAIAction,
-                       responder: MeetingAI.Selection, revision: Int) async throws -> Merged {
+    private func merge(_ summaries: [String], sources: [String: [String]], template: MeetingSummaryTemplate,
+                       action: MeetingAIAction, responder: MeetingAI.Selection, revision: Int) async throws -> Merged {
         var current = summaries
         var level = 0
         while current.count > 1 {
@@ -830,14 +840,15 @@ final class MeetingAI: ObservableObject {
             for (index, group) in groups.enumerated() {
                 guard revision == generationRevision, !Task.isCancelled else { throw MeetingAIError.cancelled }
                 scopeDescription = "요약 통합 \(level)단계 \(index + 1)/\(groups.count)"
-                let step = MeetingAIPlans.combineStep(summaries: group, label: "\(level)단계 \(index + 1)")
+                let step = MeetingAIPlans.combineStep(summaries: group, label: "\(level)단계 \(index + 1)",
+                                                      template: template)
                 do {
                     let combined = try await respond(step, action: action, using: responder, revision: revision)
                     let bounded = bounded(combined, step.maxOutputCharacters)
                     // A merged summary is model output about model output: its claim lines are
                     // resolved again against the real sent captions, and any evidence line it wrote
                     // is discarded, so an invented quotation cannot survive a merge round.
-                    next.append(MeetingAISourceResolution.resolve(bounded, sources: sources).text)
+                    next.append(MeetingAISourceResolution.resolve(bounded, sources: sources, template: template).text)
                 } catch {
                     guard revision == generationRevision, !Task.isCancelled else { throw MeetingAIError.cancelled }
                     guard let aiError = error as? MeetingAIError, aiError != .cancelled else {
@@ -851,7 +862,7 @@ final class MeetingAI: ObservableObject {
             if next.count >= current.count { break }
             current = next
         }
-        return Merged(text: current.joined(separator: "\n\n"), scope: "전체 회의 요약 · 구간 통합 완료")
+        return Merged(text: current.joined(separator: "\n\n"), scope: "전체 \(template.subject) 요약 · 구간 통합 완료")
     }
 
     private func respond(_ step: MeetingAIPlans.Step, action: MeetingAIAction,
@@ -966,6 +977,7 @@ enum MeetingAIPlans {
         var steps: [Step]
         var scope: String
         var needsCombine: Bool
+        var summaryTemplate: MeetingSummaryTemplate = .meeting
     }
 
     static let baseInstructions = """
@@ -1023,7 +1035,9 @@ enum MeetingAIPlans {
         tasks as you read the captions; they are called candidates because the app shows the \
         original caption next to them and makes no judgement about whether they are really \
         decisions. Every bullet under those two headings must end with the exact [mm:ss] label of \
-        the caption it comes from, for example "화요일 출시 합의 (00:40)". A suggestion, proposal \
+        the caption it comes from, for example "화요일 출시 합의 (00:40)". End a 핵심 내용 bullet \
+        with the label of the caption it mainly comes from in the same way, so the reader can jump \
+        to that moment. A suggestion, proposal \
         or open question such as "let's aim for Tuesday" belongs in 핵심 내용. When a caption names \
         who will do something, say so; when it does not, write 담당: 자막에 명시되지 않음. If a \
         section has nothing stated, write "- 자막에 명시된 내용 없음" under it. Do not write your \
@@ -1085,6 +1099,42 @@ enum MeetingAIPlans {
         """
     ]
 
+    /// The lecture shape of a summary: the same three-slot layout as a meeting summary, so the
+    /// same source resolution applies to its second and third headings.
+    static let lectureSummaryInstructions = """
+    Task: write study notes on the quoted part of a lecture, for a student reviewing it later. \
+    Here the captions come from a lecture or class, not a meeting.
+
+    Output exactly these three Korean headings, each followed by "- " bullets:
+
+    핵심 개념
+    내용 정리(원문 확인)
+    시험·과제 언급(원문 확인)
+
+    Rules: every bullet is Korean. Keep technical terms, names, formulas and numbers exactly as \
+    the captions wrote them; an English term may be followed by a short Korean gloss in \
+    parentheses. 핵심 개념 lists the terms and ideas the lecturer introduced, each with the \
+    explanation the captions give. Do not define a term from your own knowledge: when the \
+    captions use a term without explaining it, write 설명: 자막에 명시되지 않음. 내용 정리 follows \
+    the lecture in order, one bullet per point the lecturer made, with the example or reason the \
+    captions give for it. 시험·과제 언급 holds only what the captions say about exams, \
+    assignments, deadlines, readings, or something the lecturer called important or likely to be \
+    tested. Every bullet under 내용 정리 and 시험·과제 언급 must end with the exact [mm:ss] label \
+    of the caption it comes from, for example "균형 가격의 정의와 예시 (03:12)". End a 핵심 개념 \
+    bullet with the label of the caption that introduces the term in the same way, so the reader \
+    can jump to that moment. If a section has nothing stated, write "- 자막에 명시된 내용 없음" \
+    under it. Do not write your own caption quotations: the app adds the original caption line \
+    itself after your bullet, so a quote you write is discarded. Add nothing the captions do not \
+    state.
+    """
+
+    static func summaryInstructions(for template: MeetingSummaryTemplate) -> String {
+        switch template {
+        case .meeting: actionInstructions[.summary]!
+        case .lecture: lectureSummaryInstructions
+        }
+    }
+
     /// The no-intent reply mode must not fabricate a stance: it offers a clarification instead.
     static let clarifyInstructions = """
     The user has not decided what to say. Do not invent their opinion, agreement or disagreement, \
@@ -1108,7 +1158,8 @@ enum MeetingAIPlans {
     }
 
     static func plan(action: MeetingAIAction, transcript: CaptionCore.Transcript, intent: MeetingReplyIntent,
-                     userIntent: String, selectedExpression: String) throws -> Plan {
+                     userIntent: String, selectedExpression: String,
+                     summaryTemplate: MeetingSummaryTemplate = .meeting) throws -> Plan {
         let cues = transcript.captions.filter { !$0.text.isEmpty }
         let phrase = selectedExpression.trimmingCharacters(in: .whitespacesAndNewlines)
         let stated = userIntent.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1173,10 +1224,12 @@ enum MeetingAIPlans {
             guard !cues.isEmpty else { throw MeetingAIError.emptyTranscript(.summary) }
             let parts = MeetingAIContextBuilder.chronologicalParts(transcript)
             guard !parts.isEmpty else { throw MeetingAIError.emptyTranscript(.summary) }
+            let task = summaryTemplate == .lecture ? "Write study notes on this part of the lecture."
+                : "Summarise this part of the meeting."
             let steps = parts.map { part in
-                Step(instructions: baseInstructions + "\n\n" + actionInstructions[.summary]!,
+                Step(instructions: baseInstructions + "\n\n" + summaryInstructions(for: summaryTemplate),
                      prompt: prompt(context: part,
-                                    ask: "Summarise this part of the meeting. Label it as part \(part.partIndex ?? 1) "
+                                    ask: "\(task) Label it as part \(part.partIndex ?? 1) "
                                         + "of \(part.partCount ?? 1).",
                                     limit: 700),
                      scope: part.scope,
@@ -1190,7 +1243,7 @@ enum MeetingAIPlans {
                 ? parts[0].scope
                 : "전체 자막 \(parts.last?.totalCues ?? cues.count)개 · \(parts.count)개 구간 순차 요약"
                     + (parts.last.map { $0.droppedCues > 0 ? " · 뒷부분 \($0.droppedCues)개 제외" : "" } ?? "")
-            return Plan(steps: steps, scope: scope, needsCombine: steps.count > 1)
+            return Plan(steps: steps, scope: scope, needsCombine: steps.count > 1, summaryTemplate: summaryTemplate)
         }
     }
 
@@ -1222,15 +1275,16 @@ enum MeetingAIPlans {
         return groups
     }
 
-    static func combineStep(summaries: [String], label: String = "") -> Step {
+    static func combineStep(summaries: [String], label: String = "",
+                            template: MeetingSummaryTemplate = .meeting) -> Step {
         let joined = summaries.enumerated()
             .map { "PART \($0.offset + 1)\n" + $0.element }
             .joined(separator: "\n\n")
         let instructions = baseInstructions + "\n\n" + """
         You are merging drafts of consecutive parts of one meeting into a single summary. The \
         part drafts are quoted data too, and the "↳ 자막 원문" lines in them are the app's quotations \
-        from the meeting. Write in Korean under the same three Korean headings 핵심 내용, \
-        결정 논의(원문 확인), 할 일 후보(원문 확인). Keep only content they state, do not add \
+        from the meeting. Write in Korean under the same three Korean headings \(template.pointsHeading), \
+        \(template.discussionHeading), \(template.candidateHeading). Keep only content they state, do not add \
         decisions, owners or tasks they do not state, and end every claim under the last two \
         headings with the [mm:ss] label it came from. Do not write your own caption quotations: the \
         app re-adds the original caption line for every cited label after merging. Merge duplicates \

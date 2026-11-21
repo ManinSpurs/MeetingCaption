@@ -81,7 +81,7 @@ struct RecoveryTests {
 @MainActor
 struct SettingsWindowTests {
     @Test func everyPaneHasATitleAndTheNavigationStartsOnGeneral() {
-        #expect(SettingsPane.allCases.map(\.title) == ["일반", "번역", "AI", "용어집", "업데이트", "개인정보"])
+        #expect(SettingsPane.allCases.map(\.title) == ["일반", "번역·AI", "용어집", "정보"])
         #expect(SettingsNavigation().pane == .general)
     }
 

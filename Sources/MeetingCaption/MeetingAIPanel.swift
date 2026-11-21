@@ -8,6 +8,8 @@ import SwiftUI
 struct MeetingAIPanel: View {
     @ObservedObject var ai: MeetingAI
     let transcript: CaptionCore.Transcript
+    /// A caption time (`mm:ss`) in a summary was clicked.
+    var onOpenStamp: (String) -> Void = { _ in }
     @StateObject private var ui = MeetingAIPanelState()
     @Environment(\.openSettings) private var openSettings
 
@@ -89,7 +91,7 @@ struct MeetingAIPanel: View {
     private func tabTitle(_ action: MeetingAIAction) -> String {
         switch action {
         case .reply: return "발언 도우미"
-        case .summary: return "회의 요약"
+        case .summary: return "요약"
         case .expressions: return "표현 교정"
         case .practice: return "복습 연습"
         }
@@ -143,12 +145,23 @@ struct MeetingAIPanel: View {
 
     private var summaryControls: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("지금까지 확정된 자막을 요약하고 관련 원문을 함께 보여줍니다. 결정·할 일은 AI의 정리 초안이므로 원문과 비교해 확인하세요.")
+            Picker("형식", selection: $ui.summaryTemplate) {
+                ForEach(MeetingSummaryTemplate.allCases) { template in
+                    Text(template.title).tag(template)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .disabled(ai.isBusy)
+            .accessibilityLabel("요약 형식")
+            Text(ui.summaryTemplate == .lecture
+                 ? "강의 자막을 핵심 개념, 내용 정리, 시험·과제 언급으로 정리하고 관련 원문을 함께 보여줍니다. 결과의 시간 표시를 누르면 그 자막으로 이동하고, 녹음이 있으면 그 부분부터 들려줍니다."
+                 : "지금까지 확정된 자막을 요약하고 관련 원문을 함께 보여줍니다. 결정·할 일은 AI의 정리 초안이므로 원문과 비교해 확인하세요. 결과의 시간 표시를 누르면 그 자막으로 이동하고, 녹음이 있으면 그 부분부터 들려줍니다.")
                 .panelNote()
             Button {
                 generate(.summary)
             } label: {
-                Label("회의 요약 만들기", systemImage: "list.bullet.rectangle")
+                Label("\(ui.summaryTemplate.title) 만들기", systemImage: "list.bullet.rectangle")
             }
             .buttonStyle(.borderedProminent)
             .disabled(!canGenerate(.summary))
@@ -229,7 +242,7 @@ struct MeetingAIPanel: View {
                 .font(.callout.weight(.medium))
             Text(reason)
                 .panelNote()
-            Button("AI 설정 열기") { SettingsNavigation.shared.show(.ai, using: openSettings) }
+            Button("AI 설정 열기") { SettingsNavigation.shared.show(.assist, using: openSettings) }
                 .controlSize(.small)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -321,13 +334,18 @@ struct MeetingAIPanel: View {
                     .help("결과를 클립보드로 복사합니다. 어디에도 자동으로 보내지 않습니다.")
                     .accessibilityLabel("\(tabTitle(ui.action)) 결과 복사")
                 }
-                Text(text)
+                resultText(text)
                     .font(.callout)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(10)
                     .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
+                    .environment(\.openURL, OpenURLAction { url in
+                        guard url.scheme == Self.stampScheme else { return .systemAction }
+                        onOpenStamp(url.lastPathComponent.replacingOccurrences(of: "-", with: ":"))
+                        return .handled
+                    })
                     .accessibilityLabel("\(tabTitle(ui.action)) AI 결과 텍스트")
                     .accessibilityValue(text)
                 scopeCaption
@@ -341,6 +359,23 @@ struct MeetingAIPanel: View {
                 .font(.caption)
                 .foregroundStyle(.tertiary)
         }
+    }
+
+    private static let stampScheme = "meetingcaption-stamp"
+
+    /// A summary's caption times become links when the open record still has that moment;
+    /// every other result is plain text.
+    private func resultText(_ text: String) -> Text {
+        guard ui.action == .summary else { return Text(text) }
+        var linked = AttributedString(text)
+        for link in MeetingAISourceResolution.stampLinks(in: text) {
+            guard MeetingAISourceResolution.caption(forStamp: link.stamp, in: transcript.captions) != nil,
+                  let range = Range(link.range, in: linked),
+                  let url = URL(string: "\(Self.stampScheme)://caption/" + link.stamp.replacingOccurrences(of: ":", with: "-"))
+            else { continue }
+            linked[range].link = url
+        }
+        return Text(linked)
     }
 
     /// The scope recorded when this tab's result was generated, so it stays honest after
@@ -379,7 +414,7 @@ struct MeetingAIPanel: View {
                 .layoutPriority(1)
             Spacer(minLength: 4)
             Button {
-                SettingsNavigation.shared.show(.ai, using: openSettings)
+                SettingsNavigation.shared.show(.assist, using: openSettings)
             } label: {
                 Text(ai.provider == .apple ? "Apple 기기 내" : "\(ai.provider.vendor) API")
                     .font(.caption2)
@@ -455,7 +490,8 @@ struct MeetingAIPanel: View {
             transcript: transcript,
             intent: request.intent,
             userIntent: request.userIntent.trimmingCharacters(in: .whitespacesAndNewlines),
-            selectedExpression: request.expression.trimmingCharacters(in: .whitespacesAndNewlines)
+            selectedExpression: request.expression.trimmingCharacters(in: .whitespacesAndNewlines),
+            summaryTemplate: request.summaryTemplate
         )
     }
 
@@ -493,17 +529,23 @@ final class MeetingAIPanelState: ObservableObject {
         var intent: MeetingReplyIntent
         var userIntent: String
         var expression: String
+        var summaryTemplate: MeetingSummaryTemplate
     }
 
     @Published var action: MeetingAIAction = .reply
     @Published var intent: MeetingReplyIntent = .clarify
     @Published var userIntent = ""
     @Published var expression = ""
+    /// Kept across records and launches: someone who takes lectures keeps getting lecture notes.
+    @Published var summaryTemplate = MeetingSummaryTemplate(rawValue: UserDefaults.standard.string(forKey: "meetingSummaryTemplate") ?? "") ?? .meeting {
+        didSet { UserDefaults.standard.set(summaryTemplate.rawValue, forKey: "meetingSummaryTemplate") }
+    }
     @Published var dismissedError: String?
     @Published var lastRequest: Request?
 
     func currentRequest() -> Request {
-        Request(action: action, intent: intent, userIntent: userIntent, expression: expression)
+        Request(action: action, intent: intent, userIntent: userIntent, expression: expression,
+                summaryTemplate: summaryTemplate)
     }
 
     func startFreshSession() {

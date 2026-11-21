@@ -4,45 +4,42 @@ import SwiftUI
 
 /// Panes of the Settings window. Every configuration control lives in exactly one of them.
 enum SettingsPane: String, CaseIterable, Identifiable {
-    case general, translation, ai, glossary, update, privacy
+    /// `assist` holds translation and AI together: both are "which provider, which key, may it
+    /// send text". `about` holds updates and privacy.
+    case general, assist, glossary, about
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .general: return "일반"
-        case .translation: return "번역"
-        case .ai: return "AI"
+        case .assist: return "번역·AI"
         case .glossary: return "용어집"
-        case .update: return "업데이트"
-        case .privacy: return "개인정보"
+        case .about: return "정보"
         }
     }
 
     var symbol: String {
         switch self {
         case .general: return "gearshape"
-        case .translation: return "character.bubble"
-        case .ai: return "sparkles"
+        case .assist: return "sparkles"
         case .glossary: return "text.book.closed"
-        case .update: return "arrow.triangle.2.circlepath"
-        case .privacy: return "hand.raised"
+        case .about: return "info.circle"
         }
     }
 
     var height: CGFloat {
         switch self {
         case .general: return 560
-        case .translation, .ai: return 620
+        case .assist: return 640
         case .glossary: return 300
-        case .update: return 360
-        case .privacy: return 380
+        case .about: return 560
         }
     }
 }
 
 /// Which pane the Settings window shows. The main window sets it before opening Settings, so
-/// "AI 설정 열기" lands on the AI pane.
+/// "AI 설정 열기" lands on the 번역·AI pane.
 @MainActor
 final class SettingsNavigation: ObservableObject {
     static let shared = SettingsNavigation()
@@ -116,15 +113,11 @@ struct MeetingSettingsView: View {
     private func paneView(_ pane: SettingsPane) -> some View {
         switch pane {
         case .general: GeneralSettingsPane(model: model)
-        case .translation: TranslationSettingsPane(model: model, ui: ui)
-        case .ai: AISettingsPane(ai: ai)
+        case .assist: AssistSettingsPane(model: model, ai: ai, ui: ui)
         case .glossary:
             Form { Section("전공 용어집") { GlossarySidebarSection(model: model) } }
                 .formStyle(.grouped)
-        case .update:
-            Form { Section { UpdateSettingsSection(updater: AppUpdater.shared) } }
-                .formStyle(.grouped)
-        case .privacy: PrivacySettingsPane()
+        case .about: AboutSettingsPane()
         }
     }
 }
@@ -197,8 +190,11 @@ private struct GeneralSettingsPane: View {
     }
 }
 
-private struct TranslationSettingsPane: View {
+/// Translation and AI in one pane. Each shows one provider picker and, under it, only the
+/// settings of the provider that is selected.
+private struct AssistSettingsPane: View {
     @ObservedObject var model: MeetingModel
+    @ObservedObject var ai: MeetingAI
     @ObservedObject var ui: MeetingViewState
 
     var body: some View {
@@ -210,11 +206,7 @@ private struct TranslationSettingsPane: View {
                         Text(provider.title).tag(provider)
                     }
                 }
-                Text("제공자를 바꿔도 완료된 번역은 유지하며, 아직 번역되지 않은 문장부터 새 제공자를 사용합니다.")
-                    .sidebarNote()
-                Text(explanation).sidebarNote()
-            }
-            Section("\(model.translationProvider.title) 설정") {
+                .help("제공자를 바꿔도 완료된 번역은 유지하며, 아직 번역되지 않은 문장부터 새 제공자를 사용합니다.")
                 switch model.translationProvider {
                 case .google: GoogleTranslationSettingsSection(model: model)
                 case .deepL: DeepLTranslationSettingsSection(model: model)
@@ -225,9 +217,25 @@ private struct TranslationSettingsPane: View {
                     }
                     .disabled(!model.translationEnabled || !MeetingViewState.canTranslate(localeID: model.localeID))
                 }
+                Text(explanation).sidebarNote()
+            }
+            Section("AI 도우미") {
+                Picker("AI 제공자", selection: $ai.provider) {
+                    ForEach(MeetingAIProvider.allCases) { provider in
+                        Text(panelProviderTitle(provider)).tag(provider)
+                    }
+                }
+                .accessibilityLabel("AI 제공자 선택")
+                switch ai.provider {
+                case .apple: appleAI
+                case .openAI: OpenAISettingsSection(ai: ai)
+                case .gemini: GeminiSettingsSection(ai: ai)
+                case .claude: ClaudeSettingsSection(ai: ai)
+                }
             }
         }
         .formStyle(.grouped)
+        .task { await ai.refreshAvailability() }
     }
 
     private var explanation: String {
@@ -236,23 +244,27 @@ private struct TranslationSettingsPane: View {
         if !model.translationEnabled { return "번역을 켜면 확정된 문장에 한국어 번역을 함께 보관합니다. 이미 번역된 문장은 계속 표시됩니다." }
         return "번역 모델을 준비하면 확정된 문장부터 한국어 번역이 붙습니다."
     }
-}
 
-private struct AISettingsPane: View {
-    @ObservedObject var ai: MeetingAI
-
-    var body: some View {
-        Form {
-            Section("AI 도우미") { MeetingAISettingsView(ai: ai) }
+    private var appleAI: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(ai.localAvailability)
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("Apple Intelligence가 꺼져 있으면 시스템 설정 > Apple Intelligence 및 Siri에서 켜야 합니다. 켜져 있어도 이 Mac이나 언어 조합에 따라 쓸 수 없을 수 있습니다.")
+                .panelNote()
+            Button("사용 가능 여부 다시 확인") {
+                Task { await ai.refreshAvailability() }
+            }
+            .controlSize(.small)
+            .disabled(ai.isBusy)
         }
-        .formStyle(.grouped)
-        .task { await ai.refreshAvailability() }
     }
 }
 
-private struct PrivacySettingsPane: View {
+private struct AboutSettingsPane: View {
     var body: some View {
         Form {
+            Section { UpdateSettingsSection(updater: AppUpdater.shared) }
             Section("개인정보") {
                 Text("음성 인식은 이 Mac의 Apple 음성 인식으로 처리되며 회의 오디오를 별도 서버로 보내지 않습니다. 컴퓨터 소리를 받으려면 ‘화면 및 시스템 오디오 녹음’ 권한이, 마이크를 쓰려면 ‘마이크’ 권한이 필요합니다. 일부 앱은 시스템 오디오 캡처를 막습니다. 기록은 이 Mac의 보관 폴더에만 저장됩니다. 번역과 AI는 기본으로 이 Mac의 Apple 기능을 쓰며, 외부 제공자(Google·DeepL·Papago·OpenAI·Gemini·Claude)는 직접 고르고 전송에 동의한 경우에만 자막 텍스트를 보냅니다. 녹음 파일은 어디로도 보내지 않습니다.")
                     .sidebarNote()
@@ -266,53 +278,6 @@ private struct PrivacySettingsPane: View {
             }
         }
         .formStyle(.grouped)
-    }
-}
-
-/// Provider, availability, key and consent settings for the AI panel. Consent stays off
-/// until the user switches it on.
-struct MeetingAISettingsView: View {
-    @ObservedObject var ai: MeetingAI
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Picker("AI 제공자", selection: $ai.provider) {
-                ForEach(MeetingAIProvider.allCases) { provider in
-                    Text(panelProviderTitle(provider)).tag(provider)
-                }
-            }
-            .pickerStyle(.radioGroup)
-            .accessibilityLabel("AI 제공자 선택")
-
-            appleSection
-            switch ai.provider {
-            case .apple: EmptyView()
-            case .openAI:
-                Divider()
-                OpenAISettingsSection(ai: ai)
-            case .gemini:
-                Divider()
-                GeminiSettingsSection(ai: ai)
-            case .claude:
-                Divider()
-                ClaudeSettingsSection(ai: ai)
-            }
-        }
-    }
-
-    private var appleSection: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Apple 기기 내 처리 · \(ai.localAvailability)")
-                .font(.callout)
-                .fixedSize(horizontal: false, vertical: true)
-            Text("Apple Intelligence가 꺼져 있으면 시스템 설정 > Apple Intelligence 및 Siri에서 켜야 합니다. 켜져 있어도 이 Mac이나 언어 조합에 따라 쓸 수 없을 수 있으며, 그때는 이 옵션이 동작하지 않습니다.")
-                .panelNote()
-            Button("사용 가능 여부 다시 확인") {
-                Task { await ai.refreshAvailability() }
-            }
-            .controlSize(.small)
-            .disabled(ai.isBusy)
-        }
     }
 }
 
