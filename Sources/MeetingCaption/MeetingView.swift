@@ -158,6 +158,7 @@ struct MeetingView: View {
     }
 
     private var transcriptHeader: some View {
+        VStack(alignment: .leading, spacing: 10) {
         HStack(alignment: .center, spacing: 10) {
             VStack(alignment: .leading, spacing: 3) {
                 Text(recordTitle)
@@ -219,6 +220,32 @@ struct MeetingView: View {
                 .buttonStyle(.borderedProminent)
                 .help("선택한 입력과 언어로 회의 기록을 시작합니다.")
             }
+        }
+            HStack(spacing: 12) {
+                Toggle("음성도 함께 녹음", isOn: $model.recordsAudio)
+                    .toggleStyle(.switch)
+                    .disabled(model.isLocked)
+                    .help("기록 시작 전에 켜세요. 선택한 마이크 또는 컴퓨터 소리를 이 Mac에 저장합니다.")
+                if model.isImporting {
+                    Label("파일의 소리 보관 중", systemImage: "waveform")
+                        .foregroundStyle(.secondary)
+                } else if model.isRecording && model.recordsAudio {
+                    Label("음성 녹음 중", systemImage: "record.circle.fill")
+                        .foregroundStyle(.red)
+                        .accessibilityLabel("음성 녹음 중. 소리를 파일로 저장하고 있습니다.")
+                } else if model.isStopping && model.recordsAudio {
+                    Text("녹음 마무리 중")
+                        .foregroundStyle(.secondary)
+                } else if model.isStarting && model.recordsAudio {
+                    Text("녹음 준비 중")
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text(model.recordsAudio ? "시작하면 소리도 저장합니다" : "소리 파일은 저장하지 않습니다")
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+            }
+            .font(.caption)
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
